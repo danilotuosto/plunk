@@ -75,11 +75,40 @@ describe('processEmailJob exhaustion handling', () => {
       }),
     );
 
-    // The job is re-queued (via QueueService.queueEmail → emailQueue.add) with a delay.
+    // The job is re-queued (via QueueService.queueEmail → emailQueue.add) with a
+    // bounded backoff delay and a UNIQUE jobId — reusing `email-e1` would dedupe
+    // against the still-active job and never schedule the retry.
     expect(addSpy).toHaveBeenCalledWith(
       'send-email',
-      {emailId: 'e1'},
-      expect.objectContaining({delay: 60 * 1000}),
+      {emailId: 'e1', attempt: 1},
+      expect.objectContaining({
+        delay: 60 * 1000,
+        jobId: expect.stringMatching(/^email-e1-retry-0-\d+$/),
+      }),
     );
+  });
+
+  it('uses exponential backoff and carries the attempt counter forward', async () => {
+    await expect(processEmailJob({data: {emailId: 'e1', attempt: 2}} as any)).resolves.toBeUndefined();
+
+    // attempt=2 → delay = min(60s * 2^2, 1h) = 4 minutes.
+    expect(addSpy).toHaveBeenCalledWith(
+      'send-email',
+      {emailId: 'e1', attempt: 3},
+      expect.objectContaining({delay: 4 * 60 * 1000}),
+    );
+  });
+
+  it('gives up (FAILED with a clear error) after the retry cap is reached', async () => {
+    await expect(processEmailJob({data: {emailId: 'e1', attempt: 10}} as any)).resolves.toBeUndefined();
+
+    // No further requeue once the cap is hit.
+    expect(addSpy).not.toHaveBeenCalled();
+
+    // Marked FAILED with an explicit message so it is not silently dropped.
+    expect(prisma.email.update).toHaveBeenCalledWith({
+      where: {id: 'e1'},
+      data: {status: EmailStatus.FAILED, error: 'All email providers exhausted after 10 attempts'},
+    });
   });
 });

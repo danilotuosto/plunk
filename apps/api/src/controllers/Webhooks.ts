@@ -2,6 +2,7 @@ import {Controller, Post} from '@overnightjs/core';
 import type {Prisma} from '@plunk/db';
 import {EmailSourceType, EmailStatus} from '@plunk/db';
 import type {Request, Response} from 'express';
+import crypto from 'crypto';
 import {simpleParser} from 'mailparser';
 import sanitizeHtml from 'sanitize-html';
 import signale from 'signale';
@@ -10,7 +11,7 @@ import type Stripe from 'stripe';
 import {ProjectDisabledPaymentEmail, sendPlatformEmail} from '@plunk/email';
 import React from 'react';
 
-import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED, STRIPE_WEBHOOK_SECRET} from '../app/constants.js';
+import {DASHBOARD_URI, BREVO_WEBHOOK_SECRET, LANDING_URI, STRIPE_ENABLED, STRIPE_WEBHOOK_SECRET} from '../app/constants.js';
 import {stripe} from '../app/stripe.js';
 import {prisma} from '../database/prisma.js';
 import {BillingLimitService} from '../services/BillingLimitService.js';
@@ -343,12 +344,35 @@ export class Webhooks {
   @CatchAsync
   public async receiveBrevoWebhook(req: Request, res: Response) {
     try {
-      // The raw parser keeps the untouched body available for future signature
-      // verification; parse it into a payload object here since the handler works
-      // on the decoded JSON.
-      const raw = req.body;
+      // The raw parser mounted on /webhooks/brevo keeps `req.body` as a Buffer of the
+      // untouched request body, which is exactly what the signature is computed over.
+      const rawBody = req.body as Buffer | string;
+
+      // Optional HMAC verification. Brevo signs webhooks with X-Sib-Signature:
+      // HMAC-SHA256 of the RAW body, hex-encoded, keyed by the webhook secret.
+      // Skipped entirely when BREVO_WEBHOOK_SECRET is unset (backward compatible).
+      if (BREVO_WEBHOOK_SECRET) {
+        const signature = req.headers['x-sib-signature'];
+        if (!signature) {
+          signale.warn('[WEBHOOK] Missing X-Sib-Signature header');
+          return res.status(401).json({success: false, error: 'Missing signature'});
+        }
+
+        const rawBytes = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody));
+        const expected = crypto
+          .createHmac('sha256', BREVO_WEBHOOK_SECRET)
+          .update(rawBytes)
+          .digest('hex');
+
+        const provided = Array.isArray(signature) ? signature[0] : signature;
+        if (expected !== provided) {
+          signale.warn('[WEBHOOK] Brevo signature verification failed — request rejected');
+          return res.status(403).json({success: false, error: 'Invalid signature'});
+        }
+      }
+
       const body: BrevoPayload =
-        typeof raw === 'string' || Buffer.isBuffer(raw) ? JSON.parse(raw.toString()) : raw;
+        typeof rawBody === 'string' || Buffer.isBuffer(rawBody) ? JSON.parse(rawBody.toString()) : rawBody;
 
       const mapped = mapBrevoEvent(body);
       if (!mapped) {

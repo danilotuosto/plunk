@@ -23,7 +23,10 @@ export async function sendEmailWithFallback(
   });
 
   if (providers.length === 0) {
-    throw new Error(`Project ${projectId} has no enabled email providers configured`);
+    // Not a hard failure — re-queueing lets the project's provider configuration
+    // catch up (a backfill may not have run, or an admin is mid-reconfiguration).
+    signale.warn(`[DISPATCHER] Project ${projectId} has no enabled email providers configured, re-queueing`);
+    throw new AllProvidersExhaustedError();
   }
 
   const now = new Date();

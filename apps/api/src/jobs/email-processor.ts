@@ -387,15 +387,46 @@ export async function processEmailJob(job: Job<SendEmailJobData>) {
     signale.error(`[EMAIL-PROCESSOR] Failed to send email ${emailId}:`, error);
 
     // All providers exhausted/errored: keep the email queued instead of marking it
-    // FAILED. Re-queue with a delay so it retries after a quota reset. Don't throw,
-    // so BullMQ doesn't consume a retry attempt.
+    // FAILED. Re-queue with a bounded, capped exponential backoff so a quota reset
+    // (or a provider recovering) is picked up, without churning every 60s forever.
+    // Don't throw, so BullMQ doesn't consume a retry attempt.
     if (error instanceof AllProvidersExhaustedError) {
-      signale.warn(`[EMAIL-PROCESSOR] All providers exhausted for ${emailId}, re-queuing with delay`);
+      const attempt = job.data.attempt ?? 0;
+      const MAX_ATTEMPTS = 10;
+
+      // Cap reached: stop the requeue churn. Marking FAILED with a clear error is
+      // visible (not silently dropped) — better than an email stranded in PENDING
+      // with no trace of why it stopped moving.
+      if (attempt >= MAX_ATTEMPTS) {
+        signale.error(
+          `[EMAIL-PROCESSOR] All providers exhausted for ${emailId} after ${attempt} attempts, giving up`,
+        );
+        await prisma.email.update({
+          where: {id: emailId},
+          data: {
+            status: EmailStatus.FAILED,
+            error: `All email providers exhausted after ${attempt} attempts`,
+          },
+        });
+        return;
+      }
+
+      signale.warn(
+        `[EMAIL-PROCESSOR] All providers exhausted for ${emailId}, re-queuing with delay (attempt ${attempt})`,
+      );
       await prisma.email.update({
         where: {id: emailId},
         data: {status: EmailStatus.PENDING},
       });
-      await QueueService.queueEmail(emailId, email.sourceType, 60 * 1000); // retry in 1 min
+
+      // Exponential backoff: 60s, 2m, 4m, ... capped at 1 hour.
+      const delay = Math.min(60 * 1000 * Math.pow(2, attempt), 60 * 60 * 1000);
+      await QueueService.queueEmail(emailId, email.sourceType, delay, {
+        attempt: attempt + 1,
+        // Unique job id: the active `email-${emailId}` job still exists, so reusing
+        // it would dedupe and never schedule the delayed retry.
+        jobId: `email-${emailId}-retry-${attempt}-${Date.now()}`,
+      });
       return;
     }
 

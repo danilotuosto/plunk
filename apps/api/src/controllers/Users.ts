@@ -228,6 +228,16 @@ export class Users {
             role: 'OWNER',
           },
         },
+        // Default enabled SES provider at priority 0. SES uses env credentials, so a
+        // row needs no apiKey; without it a fresh project would have no enabled
+        // provider and every send would hit the exhaustion/requeue path.
+        emailProviders: {
+          create: {
+            provider: 'SES',
+            enabled: true,
+            priority: 0,
+          },
+        },
       },
     });
 

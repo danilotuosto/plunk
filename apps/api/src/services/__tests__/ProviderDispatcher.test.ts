@@ -25,9 +25,10 @@ const email = {
 } as any;
 
 describe('sendEmailWithFallback', () => {
-  it('throws when the project has no enabled providers', async () => {
+  it('throws AllProvidersExhaustedError when the project has no enabled providers', async () => {
     vi.mocked(prisma.projectEmailProvider.findMany).mockResolvedValue([]);
-    await expect(sendEmailWithFallback('proj1', email)).rejects.toThrow();
+    // Re-queues (via AllProvidersExhaustedError) rather than hard-failing.
+    await expect(sendEmailWithFallback('proj1', email)).rejects.toBeInstanceOf(AllProvidersExhaustedError);
   });
 
   it('sends through the highest-priority provider and increments usage', async () => {

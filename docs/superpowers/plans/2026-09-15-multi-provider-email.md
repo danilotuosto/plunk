@@ -1191,3 +1191,11 @@ git commit -m "feat(web): add email provider settings UI"
 - **Spec coverage:** data model (Task 1), provider abstraction (Task 2), quota per-project (Task 3), fallback+queue (Tasks 4-5), Brevo webhook (Task 6), config enable/reorder/quota (Tasks 7-8). SES stays optional (it's just one `EmailProvider`; if not configured, no row exists). Domain verification via Brevo API is intentionally out of scope per the spec.
 - **Placeholder scan:** Task 8 is intentionally lighter and depends on discovering the web app's existing settings conventions; Task 5's test has a note about the cleanest assertion. These are the only two soft spots and are flagged inline rather than silently underspecified.
 - **Type consistency:** `OutboundEmail`, `ProviderConfig`, `SendResult`, `EmailProvider` are defined in Task 2 and used identically in Tasks 4-5. `AllProvidersExhaustedError` defined in Task 4, used in Task 5. `ProjectEmailProvider`/`ProviderQuotaUsage` from Task 1 used across Tasks 3-7.
+
+---
+
+## Known Limitations
+
+### Soft quota enforcement (accepted for this phase)
+
+Quota enforcement is **soft**: `ProviderQuotaService.getRemaining` reads today's/month's usage and the dispatcher checks it immediately before sending, but the check and the `incrementUsage` write are **not atomic** — two concurrent sends for the same provider can both observe remaining quota and both send, overshooting `dailyQuota`/`monthlyQuota` slightly under contention. This is a deliberate, documented trade-off for this phase: an atomic check-and-increment would require a row lock or a serialized counter per provider/date, adding contention to the hot send path at the scale Plunk operates. The small overshoot on bursty traffic is accepted; operators wanting strict enforcement can set quotas with headroom. If strict enforcement becomes a requirement, the follow-up is to gate sends on an atomic counter (e.g. `UPDATE ... SET count = count + 1 WHERE count < quota` returning rowcount) or move to a BullMQ per-provider semaphore.

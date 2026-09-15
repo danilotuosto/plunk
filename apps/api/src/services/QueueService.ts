@@ -314,13 +314,14 @@ export class QueueService {
     emailId: string,
     sourceType: EmailSourceType,
     delay?: number,
+    options?: {jobId?: string; attempt?: number},
   ): Promise<Job<SendEmailJobData>> {
     return emailQueue.add(
       'send-email',
-      {emailId},
+      {emailId, attempt: options?.attempt},
       {
         delay,
-        jobId: `email-${emailId}`,
+        jobId: options?.jobId ?? `email-${emailId}`,
         priority: emailPriorityFor(sourceType),
       },
     );

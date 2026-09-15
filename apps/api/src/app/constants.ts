@@ -105,6 +105,11 @@ export const SES_CONFIGURATION_SET_NO_TRACKING = validateEnv(
 // Check if no-tracking configuration set was explicitly provided (not using default)
 export const TRACKING_TOGGLE_ENABLED = process.env.SES_CONFIGURATION_SET_NO_TRACKING !== undefined;
 
+// Brevo webhook signing (optional)
+// When set, the /webhooks/brevo endpoint verifies the `X-Sib-Signature` HMAC-SHA256
+// header against the raw request body. When unset, verification is skipped.
+export const BREVO_WEBHOOK_SECRET = validateEnv('BREVO_WEBHOOK_SECRET', '');
+
 // SMTP Server Configuration (optional)
 // SMTP server can run with or without a domain (runs without TLS in dev mode)
 // Check if we should enable SMTP features in the UI
