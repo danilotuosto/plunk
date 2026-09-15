@@ -34,7 +34,17 @@ import {
 } from '@plunk/ui';
 import {AnimatePresence, motion} from 'framer-motion';
 import {NextSeo} from 'next-seo';
-import {AlertTriangle, CreditCard, Database, Globe, Mail, Settings as SettingsIcon, Shield, Users} from 'lucide-react';
+import {
+  AlertTriangle,
+  CreditCard,
+  Database,
+  Globe,
+  Mail,
+  Send,
+  Settings as SettingsIcon,
+  Shield,
+  Users,
+} from 'lucide-react';
 import type {z} from 'zod';
 import {useRouter} from 'next/router';
 import {DashboardLayout} from '../../components/DashboardLayout';
@@ -45,6 +55,7 @@ import {BillingInvoices} from '../../components/BillingInvoices';
 import {UnpaidInvoiceBanner} from '../../components/UnpaidInvoiceBanner';
 import {ApiKeyDisplay} from '../../components/ApiKeyDisplay';
 import {SmtpSettings} from '../../components/SmtpSettings';
+import {EmailProvidersSettings} from '../../components/EmailProvidersSettings';
 import {DataManagementSettings} from '../../components/DataManagementSettings';
 import {TeamSettings} from '../../components/TeamSettings';
 import {SecuritySettings} from '../../components/SecuritySettings';
@@ -56,7 +67,7 @@ import {useUser} from '../../lib/hooks/useUser';
 import {useProjectSecurity} from '../../lib/hooks/useProjectSecurity';
 import useSWR from 'swr';
 
-type TabId = 'general' | 'billing' | 'domains' | 'smtp' | 'data' | 'team' | 'security';
+type TabId = 'general' | 'billing' | 'domains' | 'providers' | 'smtp' | 'data' | 'team' | 'security';
 
 interface Tab {
   id: TabId;
@@ -73,6 +84,7 @@ const buildTabs = (options: {billingEnabled: boolean; smtpEnabled: boolean}): Ta
     {id: 'security', label: 'Security', icon: Shield},
     {id: 'billing', label: 'Billing', icon: CreditCard, condition: billingEnabled},
     {id: 'domains', label: 'Domains', icon: Globe},
+    {id: 'providers', label: 'Providers', icon: Send},
     {id: 'smtp', label: 'SMTP', icon: Mail, condition: smtpEnabled},
     {id: 'data', label: 'Data', icon: Database},
   ];
@@ -796,6 +808,11 @@ export default function Settings() {
             {/* Domains Tab */}
             <TabsContent value="domains">
               <DomainsSettings projectId={activeProject.id} />
+            </TabsContent>
+
+            {/* Providers Tab */}
+            <TabsContent value="providers">
+              <EmailProvidersSettings projectId={activeProject.id} />
             </TabsContent>
 
             {/* SMTP Tab */}
