@@ -14,6 +14,7 @@ import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED, STRIPE_WEBHOOK_SECRET} from 
 import {stripe} from '../app/stripe.js';
 import {prisma} from '../database/prisma.js';
 import {BillingLimitService} from '../services/BillingLimitService.js';
+import {mapBrevoEvent, type BrevoPayload} from '../services/BrevoWebhookService.js';
 import {CampaignService} from '../services/CampaignService.js';
 import {ContactService} from '../services/ContactService.js';
 import {EventService} from '../services/EventService.js';
@@ -23,6 +24,11 @@ import {NtfyService} from '../services/NtfyService.js';
 import {QueueService} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
+
+/**
+ * Email row with its required relations, as loaded by the webhook handlers.
+ */
+type EmailWithRelations = Prisma.EmailGetPayload<{include: {contact: true; project: true}}>;
 
 /**
  * Webhooks Controller
@@ -315,186 +321,250 @@ export class Webhooks {
         return res.status(404).json({success: false, error: 'Email not found'});
       }
 
-      const now = new Date();
-      const updateData: Prisma.EmailUpdateInput = {};
-      const eventName = `email.${eventType.toLowerCase()}`;
-
-      // Base event data with email metadata
-      const baseEventData = {
-        subject: email.subject,
-        from: email.from,
-        fromName: email.fromName,
-        messageId: email.messageId,
-        emailId: email.id,
-        templateId: email.templateId,
-        campaignId: email.campaignId,
-        sourceType: email.sourceType,
-      };
-      let eventData: Record<string, unknown> = baseEventData;
-
-      // Process event based on type
-      switch (eventType) {
-        case 'Delivery':
-          signale.success(`[WEBHOOK] Delivery confirmed for ${email.contact.email} from ${email.project.name}`);
-          updateData.status = EmailStatus.DELIVERED;
-          updateData.deliveredAt = now;
-          eventData = {
-            ...baseEventData,
-            deliveredAt: now.toISOString(),
-          };
-          break;
-
-        case 'Open':
-          signale.success(`[WEBHOOK] Open received for ${email.contact.email} from ${email.project.name}`);
-          // Only set openedAt on first open
-          if (!email.openedAt) {
-            updateData.openedAt = now;
-          }
-          updateData.opens = (email.opens || 0) + 1;
-          updateData.status = EmailStatus.OPENED;
-          eventData = {
-            ...baseEventData,
-            openedAt: email.openedAt?.toISOString() || now.toISOString(),
-            opens: (email.opens || 0) + 1,
-            isFirstOpen: !email.openedAt,
-          };
-          break;
-
-        case 'Click': {
-          signale.success(`[WEBHOOK] Click received for ${email.contact.email} from ${email.project.name}`);
-          const clickedLink = body.click?.link;
-          // Only set clickedAt on first click
-          if (!email.clickedAt) {
-            updateData.clickedAt = now;
-          }
-          updateData.clicks = (email.clicks || 0) + 1;
-          updateData.status = EmailStatus.CLICKED;
-          eventData = {
-            ...baseEventData,
-            link: clickedLink,
-            clickedAt: email.clickedAt?.toISOString() || now.toISOString(),
-            clicks: (email.clicks || 0) + 1,
-            isFirstClick: !email.clickedAt,
-          };
-          break;
-        }
-
-        case 'Bounce': {
-          const bounceType = body.bounce?.bounceType;
-          const isPermanentBounce = bounceType === 'Permanent';
-          const isTransientBounce = bounceType === 'Transient';
-
-          if (isPermanentBounce) {
-            // Hard bounce - counts toward bounce rate and unsubscribes contact
-            signale.warn(`[WEBHOOK] Permanent bounce received for ${email.contact.email} from ${email.project.name}`);
-            updateData.status = EmailStatus.BOUNCED;
-            updateData.bouncedAt = now;
-            // Unsubscribe contact on permanent bounce. Clearing `snoozedUntil` is what stops
-            // the snooze sweep from resubscribing a hard-bounced address later and mailing it
-            // again. See SNOOZE_CLEARED_ON_WRITE in ContactService.
-            await prisma.contact.update({
-              where: {id: email.contactId},
-              data: {subscribed: false, snoozedUntil: null},
-            });
-            eventData = {
-              ...baseEventData,
-              bounceType,
-              bouncedAt: now.toISOString(),
-            };
-
-            // Send notification about permanent bounce
-            await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
-          } else if (isTransientBounce) {
-            // Soft bounce (e.g., out-of-office, mailbox full) - don't count toward bounce rate
-            signale.info(
-              `[WEBHOOK] Transient bounce received for ${email.contact.email} from ${email.project.name} (not counted toward bounce rate)`,
-            );
-            // Don't update email status or unsubscribe contact
-            // Just track the event for visibility
-            eventData = {
-              ...baseEventData,
-              bounceType,
-              transientBounce: true,
-            };
-          } else {
-            // Unknown bounce type - treat as permanent to be safe
-            signale.warn(
-              `[WEBHOOK] Unknown bounce type (${bounceType}) received for ${email.contact.email} from ${email.project.name} - treating as permanent`,
-            );
-            updateData.status = EmailStatus.BOUNCED;
-            updateData.bouncedAt = now;
-            // Suppress and clear any snooze, exactly as the permanent-bounce branch does.
-            await prisma.contact.update({
-              where: {id: email.contactId},
-              data: {subscribed: false, snoozedUntil: null},
-            });
-            eventData = {
-              ...baseEventData,
-              bounceType,
-              bouncedAt: now.toISOString(),
-            };
-
-            await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
-          }
-          break;
-        }
-
-        case 'Complaint':
-          signale.warn(`[WEBHOOK] Complaint received for ${email.contact.email} from ${email.project.name}`);
-          updateData.status = EmailStatus.COMPLAINED;
-          updateData.complainedAt = now;
-          // Unsubscribe contact on complaint. `snoozedUntil` is cleared so the snooze sweep
-          // can never resubscribe someone who reported this mail as spam.
-          await prisma.contact.update({
-            where: {id: email.contactId},
-            data: {subscribed: false, snoozedUntil: null},
-          });
-          eventData = {
-            ...baseEventData,
-            complainedAt: now.toISOString(),
-          };
-
-          // Send notification about complaint
-          await NtfyService.notifyEmailComplaint(email.project.name, email.projectId, email.contact.email);
-          break;
-
-        default:
-          signale.warn(`[WEBHOOK] Unknown event type: ${eventType}`);
-          return res.status(200).json({success: true});
-      }
-
-      // Update email with new status and timestamps
-      await prisma.email.update({
-        where: {id: email.id},
-        data: updateData,
+      // Apply the same status transitions regardless of which provider reported the event.
+      await this.applyEmailEvent(email, eventType, {
+        link: body.click?.link,
+        bounceType: body.bounce?.bounceType,
       });
 
-      // The campaign counters the stats endpoint reads live on the campaign row, and this
-      // event has just moved one of them. They are not incremented from here: this handler
-      // runs once per recipient per event, so a write per event would serialize thousands of
-      // updates on a single row -- the same reason `sentCount` is not incremented in the send
-      // path either. Marking the campaign costs one Redis SADD, and the sweep recounts it.
-      if (email.campaignId) {
-        await CampaignService.markStatsDirty(email.campaignId);
-      }
-
-      // Track event (this will trigger workflows)
-      await EventService.trackEvent(email.projectId, eventName, email.contactId, email.id, eventData);
-
-      // Check security limits only for permanent bounces and complaints
-      // Transient bounces (soft bounces) don't count toward bounce rate
-      const isPermanentBounce = eventType === 'Bounce' && body.bounce?.bounceType === 'Permanent';
-      if (isPermanentBounce || eventType === 'Complaint') {
-        await SecurityService.checkAndEnforceSecurityLimits(email.projectId);
-      }
-
-      signale.success(`[WEBHOOK] Processed ${eventType} event for email ${email.id}`);
       return res.status(200).json({success: true});
     } catch (error) {
       signale.error('[WEBHOOK] Error processing SNS webhook:', error);
       // Always return 200 to prevent SNS from retrying
       return res.status(200).json({success: true});
     }
+  }
+
+  /**
+   * Receive Brevo webhook notifications.
+   * Maps Brevo delivery/engagement events to the same status transitions as SES.
+   */
+  @Post('brevo')
+  @CatchAsync
+  public async receiveBrevoWebhook(req: Request, res: Response) {
+    try {
+      // The raw parser keeps the untouched body available for future signature
+      // verification; parse it into a payload object here since the handler works
+      // on the decoded JSON.
+      const raw = req.body;
+      const body: BrevoPayload =
+        typeof raw === 'string' || Buffer.isBuffer(raw) ? JSON.parse(raw.toString()) : raw;
+
+      const mapped = mapBrevoEvent(body);
+      if (!mapped) {
+        signale.info('[WEBHOOK] Unknown or unmappable Brevo event');
+        return res.status(200).json({success: true});
+      }
+
+      const email = await prisma.email.findUnique({
+        where: {messageId: mapped.messageId},
+        include: {
+          contact: true,
+          project: true,
+        },
+      });
+
+      if (!email) {
+        signale.warn(
+          `[WEBHOOK] Brevo ${mapped.eventType} dropped — no email found for messageId: ${mapped.messageId}`,
+        );
+        return res.status(404).json({success: false, error: 'Email not found'});
+      }
+
+      await this.applyEmailEvent(email, mapped.eventType, {link: mapped.link, bounceType: mapped.bounceType});
+
+      return res.status(200).json({success: true});
+    } catch (error) {
+      signale.error('[WEBHOOK] Error processing Brevo webhook:', error);
+      return res.status(200).json({success: true});
+    }
+  }
+
+  /**
+   * Apply the status transitions for an outbound email engagement event to the email row.
+   * Shared by the SES/SNS handler and the Brevo handler so both providers drive the same
+   * behaviour. Returns false when the event type is unknown (nothing is applied).
+   */
+  private async applyEmailEvent(
+    email: EmailWithRelations,
+    eventType: 'Bounce' | 'Delivery' | 'Open' | 'Complaint' | 'Click',
+    extra: {link?: string; bounceType?: string},
+  ): Promise<boolean> {
+    const now = new Date();
+    const updateData: Prisma.EmailUpdateInput = {};
+    const eventName = `email.${eventType.toLowerCase()}`;
+
+    // Base event data with email metadata
+    const baseEventData = {
+      subject: email.subject,
+      from: email.from,
+      fromName: email.fromName,
+      messageId: email.messageId,
+      emailId: email.id,
+      templateId: email.templateId,
+      campaignId: email.campaignId,
+      sourceType: email.sourceType,
+    };
+    let eventData: Record<string, unknown> = baseEventData;
+
+    // Process event based on type
+    switch (eventType) {
+      case 'Delivery':
+        signale.success(`[WEBHOOK] Delivery confirmed for ${email.contact.email} from ${email.project.name}`);
+        updateData.status = EmailStatus.DELIVERED;
+        updateData.deliveredAt = now;
+        eventData = {
+          ...baseEventData,
+          deliveredAt: now.toISOString(),
+        };
+        break;
+
+      case 'Open':
+        signale.success(`[WEBHOOK] Open received for ${email.contact.email} from ${email.project.name}`);
+        // Only set openedAt on first open
+        if (!email.openedAt) {
+          updateData.openedAt = now;
+        }
+        updateData.opens = (email.opens || 0) + 1;
+        updateData.status = EmailStatus.OPENED;
+        eventData = {
+          ...baseEventData,
+          openedAt: email.openedAt?.toISOString() || now.toISOString(),
+          opens: (email.opens || 0) + 1,
+          isFirstOpen: !email.openedAt,
+        };
+        break;
+
+      case 'Click': {
+        signale.success(`[WEBHOOK] Click received for ${email.contact.email} from ${email.project.name}`);
+        const clickedLink = extra.link;
+        // Only set clickedAt on first click
+        if (!email.clickedAt) {
+          updateData.clickedAt = now;
+        }
+        updateData.clicks = (email.clicks || 0) + 1;
+        updateData.status = EmailStatus.CLICKED;
+        eventData = {
+          ...baseEventData,
+          link: clickedLink,
+          clickedAt: email.clickedAt?.toISOString() || now.toISOString(),
+          clicks: (email.clicks || 0) + 1,
+          isFirstClick: !email.clickedAt,
+        };
+        break;
+      }
+
+      case 'Bounce': {
+        const bounceType = extra.bounceType;
+        const isPermanentBounce = bounceType === 'Permanent';
+        const isTransientBounce = bounceType === 'Transient';
+
+        if (isPermanentBounce) {
+          // Hard bounce - counts toward bounce rate and unsubscribes contact
+          signale.warn(`[WEBHOOK] Permanent bounce received for ${email.contact.email} from ${email.project.name}`);
+          updateData.status = EmailStatus.BOUNCED;
+          updateData.bouncedAt = now;
+          // Unsubscribe contact on permanent bounce. Clearing `snoozedUntil` is what stops
+          // the snooze sweep from resubscribing a hard-bounced address later and mailing it
+          // again. See SNOOZE_CLEARED_ON_WRITE in ContactService.
+          await prisma.contact.update({
+            where: {id: email.contactId},
+            data: {subscribed: false, snoozedUntil: null},
+          });
+          eventData = {
+            ...baseEventData,
+            bounceType,
+            bouncedAt: now.toISOString(),
+          };
+
+          // Send notification about permanent bounce
+          await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
+        } else if (isTransientBounce) {
+          // Soft bounce (e.g., out-of-office, mailbox full) - don't count toward bounce rate
+          signale.info(
+            `[WEBHOOK] Transient bounce received for ${email.contact.email} from ${email.project.name} (not counted toward bounce rate)`,
+          );
+          // Don't update email status or unsubscribe contact
+          // Just track the event for visibility
+          eventData = {
+            ...baseEventData,
+            bounceType,
+            transientBounce: true,
+          };
+        } else {
+          // Unknown bounce type - treat as permanent to be safe
+          signale.warn(
+            `[WEBHOOK] Unknown bounce type (${bounceType}) received for ${email.contact.email} from ${email.project.name} - treating as permanent`,
+          );
+          updateData.status = EmailStatus.BOUNCED;
+          updateData.bouncedAt = now;
+          // Suppress and clear any snooze, exactly as the permanent-bounce branch does.
+          await prisma.contact.update({
+            where: {id: email.contactId},
+            data: {subscribed: false, snoozedUntil: null},
+          });
+          eventData = {
+            ...baseEventData,
+            bounceType,
+            bouncedAt: now.toISOString(),
+          };
+
+          await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
+        }
+        break;
+      }
+
+      case 'Complaint':
+        signale.warn(`[WEBHOOK] Complaint received for ${email.contact.email} from ${email.project.name}`);
+        updateData.status = EmailStatus.COMPLAINED;
+        updateData.complainedAt = now;
+        // Unsubscribe contact on complaint. `snoozedUntil` is cleared so the snooze sweep
+        // can never resubscribe someone who reported this mail as spam.
+        await prisma.contact.update({
+          where: {id: email.contactId},
+          data: {subscribed: false, snoozedUntil: null},
+        });
+        eventData = {
+          ...baseEventData,
+          complainedAt: now.toISOString(),
+        };
+
+        // Send notification about complaint
+        await NtfyService.notifyEmailComplaint(email.project.name, email.projectId, email.contact.email);
+        break;
+
+      default:
+        signale.warn(`[WEBHOOK] Unknown event type: ${eventType}`);
+        return false;
+    }
+
+    // Update email with new status and timestamps
+    await prisma.email.update({
+      where: {id: email.id},
+      data: updateData,
+    });
+
+    // The campaign counters the stats endpoint reads live on the campaign row, and this
+    // event has just moved one of them. They are not incremented from here: this handler
+    // runs once per recipient per event, so a write per event would serialize thousands of
+    // updates on a single row -- the same reason `sentCount` is not incremented in the send
+    // path either. Marking the campaign costs one Redis SADD, and the sweep recounts it.
+    if (email.campaignId) {
+      await CampaignService.markStatsDirty(email.campaignId);
+    }
+
+    // Track event (this will trigger workflows)
+    await EventService.trackEvent(email.projectId, eventName, email.contactId, email.id, eventData);
+
+    // Check security limits only for permanent bounces and complaints
+    // Transient bounces (soft bounces) don't count toward bounce rate
+    const isPermanentBounce = eventType === 'Bounce' && extra.bounceType === 'Permanent';
+    if (isPermanentBounce || eventType === 'Complaint') {
+      await SecurityService.checkAndEnforceSecurityLimits(email.projectId);
+    }
+
+    signale.success(`[WEBHOOK] Processed ${eventType} event for email ${email.id}`);
+    return true;
   }
 
   /**

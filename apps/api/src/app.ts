@@ -67,6 +67,8 @@ const server = new (class extends Server {
 
     // Specify that we need raw json for the webhook
     this.app.use('/webhooks/incoming/stripe', raw({type: 'application/json'}));
+    // Brevo: raw body so signatures could be verified on it in the future.
+    this.app.use('/webhooks/brevo', raw({type: 'application/json'}));
 
     // Set the content-type to JSON for any request coming from AWS SNS
     this.app.use(function (req, res, next) {
