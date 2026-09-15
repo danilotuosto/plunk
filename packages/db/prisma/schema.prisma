@@ -72,16 +72,17 @@ model Project {
   language String @default("en") // Language code for customer-facing content (ISO 639-1)
 
   // Relations
-  members     Membership[]
-  contacts    Contact[]
-  templates   Template[]
-  segments    Segment[]
-  workflows   Workflow[]
-  campaigns   Campaign[]
-  emails      Email[]
-  events      Event[]
-  domains     Domain[]
-  apiRequests ApiRequest[]
+  members         Membership[]
+  contacts        Contact[]
+  templates       Template[]
+  segments        Segment[]
+  workflows       Workflow[]
+  campaigns       Campaign[]
+  emails          Email[]
+  events          Event[]
+  emailProviders  ProjectEmailProvider[]
+  domains         Domain[]
+  apiRequests     ApiRequest[]
 
   idempotencyKeys IdempotencyKey[]
 
@@ -633,6 +634,36 @@ model Email {
   @@map("emails")
 }
 
+model ProjectEmailProvider {
+  id           String            @id @default(uuid())
+  project      Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId    String
+  provider     EmailProviderType
+  enabled      Boolean           @default(true)
+  priority     Int               @default(0)
+  apiKey       String?           // Brevo API key. Null for SES (uses env credentials).
+  dailyQuota   Int?              // Emails per calendar day. Null = unlimited.
+  monthlyQuota Int?              // Emails per calendar month. Null = unlimited.
+  usage        ProviderQuotaUsage[]
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@unique([projectId, provider])
+  @@index([projectId, enabled, priority])
+  @@map("project_email_providers")
+}
+
+model ProviderQuotaUsage {
+  id         String               @id @default(uuid())
+  provider   ProjectEmailProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  providerId String
+  date       DateTime             @db.Date
+  count      Int                  @default(0)
+
+  @@unique([providerId, date])
+  @@map("provider_quota_usage")
+}
+
 // ============================================
 // EVENTS (Webhook tracking & workflow triggers)
 // ============================================
@@ -864,4 +895,9 @@ enum EmailStatus {
   BOUNCED // Bounced (hard or soft)
   COMPLAINED // Marked as spam
   FAILED // Failed to send
+}
+
+enum EmailProviderType {
+  SES
+  BREVO
 }
