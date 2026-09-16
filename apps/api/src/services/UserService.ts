@@ -27,12 +27,17 @@ function getCookieDomain(): string | undefined {
       return undefined;
     }
 
-    // Extract base domain (last two parts for most domains, or .localhost)
+    // Extract base domain (last two parts for most domains).
+    // NOTE: for *.localhost we intentionally return undefined (host-only cookie).
+    // Browsers treat distinct *.localhost hosts as cross-site, so a shared
+    // Domain=.localhost cookie is unreliable AND SameSite=Lax would block it on
+    // cross-subdomain API calls. Local setups should call the API same-origin
+    // (e.g. via an /api prefix on the dashboard host) with a host-only cookie.
     const parts = hostname.split('.');
     if (parts.length >= 2) {
-      // For *.localhost, use .localhost (reserved TLD)
+      // For *.localhost, use a host-only cookie (no Domain attribute).
       if (hostname.endsWith('.localhost')) {
-        return '.localhost';
+        return undefined;
       }
       // For *.local (mDNS TLD), use the actual base domain
       if (hostname.endsWith('.local')) {
