@@ -40,10 +40,12 @@ export const S3_PUBLIC_URL = validateEnv('S3_PUBLIC_URL', '');
 export const S3_FORCE_PATH_STYLE = validateEnv('S3_FORCE_PATH_STYLE', 'true') === 'true';
 export const S3_ENABLED = S3_ACCESS_KEY_ID !== '' && S3_ACCESS_KEY_SECRET !== '';
 
-// AWS SES (required for email sending)
-export const AWS_SES_REGION = validateEnv('AWS_SES_REGION');
-export const AWS_SES_ACCESS_KEY_ID = validateEnv('AWS_SES_ACCESS_KEY_ID');
-export const AWS_SES_SECRET_ACCESS_KEY = validateEnv('AWS_SES_SECRET_ACCESS_KEY');
+// AWS SES (optional — SES is one of several configurable email providers.
+// Empty when SES is not used; sending via SES will fail and fall back to the
+// next enabled provider. See ProjectEmailProvider.)
+export const AWS_SES_REGION = validateEnv('AWS_SES_REGION', '');
+export const AWS_SES_ACCESS_KEY_ID = validateEnv('AWS_SES_ACCESS_KEY_ID', '');
+export const AWS_SES_SECRET_ACCESS_KEY = validateEnv('AWS_SES_SECRET_ACCESS_KEY', '');
 
 // Custom MAIL FROM subdomain used to construct `<subdomain>.<your-domain>`
 // when a domain is added. Defaults to `plunk`. Override when `plunk.<your-domain>`
