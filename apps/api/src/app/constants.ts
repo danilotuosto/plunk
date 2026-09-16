@@ -41,9 +41,10 @@ export const S3_FORCE_PATH_STYLE = validateEnv('S3_FORCE_PATH_STYLE', 'true') ==
 export const S3_ENABLED = S3_ACCESS_KEY_ID !== '' && S3_ACCESS_KEY_SECRET !== '';
 
 // AWS SES (optional — SES is one of several configurable email providers.
-// Empty when SES is not used; sending via SES will fail and fall back to the
-// next enabled provider. See ProjectEmailProvider.)
-export const AWS_SES_REGION = validateEnv('AWS_SES_REGION', '');
+// The region defaults to us-east-1 only so the SES client can be constructed
+// when SES is unconfigured; real SES sends still require valid credentials and
+// fail over to the next enabled provider otherwise. See ProjectEmailProvider.)
+export const AWS_SES_REGION = validateEnv('AWS_SES_REGION', 'us-east-1');
 export const AWS_SES_ACCESS_KEY_ID = validateEnv('AWS_SES_ACCESS_KEY_ID', '');
 export const AWS_SES_SECRET_ACCESS_KEY = validateEnv('AWS_SES_SECRET_ACCESS_KEY', '');
 
